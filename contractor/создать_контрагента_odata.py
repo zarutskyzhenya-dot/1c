@@ -42,14 +42,14 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 # ─────────────────────────── Logging ─────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("integration_1c.log", encoding="utf-8"),
-    ],
-)
+_fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+_console = logging.StreamHandler(sys.stdout)
+_console.setLevel(logging.WARNING)
+_console.setFormatter(_fmt)
+_file = logging.FileHandler("integration_1c.log", encoding="utf-8")
+_file.setLevel(logging.INFO)
+_file.setFormatter(_fmt)
+logging.basicConfig(level=logging.INFO, handlers=[_console, _file])
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────── Configuration ───────────────────────────────────
