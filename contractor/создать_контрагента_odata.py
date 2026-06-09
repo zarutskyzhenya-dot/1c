@@ -200,6 +200,19 @@ def get_bank_klassif_ref(mfo: str) -> str:
 
 # ─────────────────────────── Input parsers ───────────────────────────────────
 
+def _open_text(filepath: str):
+    """Open text file with BOM-based encoding detection (utf-8, utf-16, cp1251)."""
+    with open(filepath, "rb") as f:
+        bom = f.read(4)
+    if bom[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        enc = "utf-16"
+    elif bom[:3] == b"\xef\xbb\xbf":
+        enc = "utf-8-sig"
+    else:
+        enc = "utf-8-sig"
+    return open(filepath, encoding=enc, errors="replace", newline="")
+
+
 FIELD_ALIASES = {
     "назва": "name",        "name": "name",      "найменування": "name",
     "єдрпоу": "edrpou",    "edrpou": "edrpou",  "код": "edrpou",
@@ -236,7 +249,7 @@ def _validate(data: Dict[str, str]) -> None:
 
 def parse_single_txt(filepath: str) -> Dict[str, str]:
     """Один контрагент — формат 'Поле: Значення' або JSON."""
-    with open(filepath, encoding="utf-8-sig") as fh:
+    with _open_text(filepath) as fh:
         content = fh.read().strip()
 
     if content.startswith("{"):
@@ -281,13 +294,13 @@ def parse_batch_txt(filepath: str) -> List[Dict[str, str]]:
     Роздільник визначається автоматично: TAB або ;
     Пропускає порожні рядки і рядки з #.
     """
-    with open(filepath, encoding="utf-8-sig", newline="") as fh:
+    with _open_text(filepath) as fh:
         sample = fh.read(2048)
 
     delimiter = "\t" if sample.count("\t") >= sample.count(";") else ";"
 
     records = []
-    with open(filepath, encoding="utf-8-sig", newline="") as fh:
+    with _open_text(filepath) as fh:
         reader = csv.DictReader(fh, delimiter=delimiter)
         for i, row in enumerate(reader, start=2):
             if not any(row.values()):
