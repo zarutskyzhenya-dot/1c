@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-1C UT11 OData — Створення контрагента з TXT / Excel / JSON.
-Підтримує: одиночний запис і пакетну обробку (кілька рядків).
+1C UT11 OData — Створення контрагента з TXT / Excel / JSON / зображень / PDF.
+Підтримує: одиночний запис, пакетну обробку, GPT-4o vision для JPEG/PNG/PDF/DOCX.
 
 Використання:
-  python создать_контрагента_odata.py input.txt   --db Vlada2
-  python создать_контрагента_odata.py batch.xlsx  --db Vlada
-  python создать_контрагента_odata.py input.json  --db Vlada2
-  python создать_контрагента_odata.py --sample    --db Vlada2
-  python создать_контрагента_odata.py --check-only --db Vlada
+  python create_contractor_odata.py invoice.jpg  --db Vlada2
+  python create_contractor_odata.py batch.xlsx   --db Vlada
+  python create_contractor_odata.py input.txt    --db Vlada2
+  python create_contractor_odata.py --check-only --db Vlada
+
+API ключ: D:\\Project\\tools\\.env  →  OPENAI_API_KEY=sk-...
 """
 
 # ── auto-install deps ────────────────────────────────────────────────────────
@@ -23,6 +24,10 @@ def _ensure(pkg, import_as=None):
 
 _ensure("requests")
 _ensure("openpyxl")
+_ensure("openai")
+_ensure("PyMuPDF", "fitz")
+_ensure("python-docx", "docx")
+_ensure("Pillow", "PIL")
 # ────────────────────────────────────────────────────────────────────────────
 
 import requests
@@ -200,6 +205,136 @@ def get_bank_klassif_ref(mfo: str) -> str:
 
 # ─────────────────────────── Input parsers ───────────────────────────────────
 
+# ─────────────────────────── GPT-4o vision extractor ────────────────────────
+
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"}
+DOC_EXTS   = {".pdf", ".docx", ".doc"}
+VISION_EXTS = IMAGE_EXTS | DOC_EXTS
+
+_GPT_PROMPT = """Ти — асистент для витягування реквізитів українських підприємств з документів.
+Витягни реквізити і поверни ТІЛЬКИ валідний JSON без markdown і без пояснень:
+{
+  "назва": "повна юридична назва підприємства",
+  "тип": "ТОВ або ФОП або ПП або null",
+  "єдрпоу": "рівно 8 цифр без пробілів або null",
+  "інн": "ІПН платника ПДВ 10-12 цифр або null",
+  "iban": "UA + 27 цифр, разом 29 символів або null",
+  "мфо": "рівно 6 цифр або null",
+  "банк": "назва банку або null",
+  "телефон": "+380... або null",
+  "адреса": "юридична адреса або null"
+}
+Якщо поле не знайдено — null. Тільки JSON."""
+
+
+def _load_openai_key() -> str:
+    env_file = Path(r"D:\Project\tools\.env")
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            if line.startswith("OPENAI_API_KEY="):
+                return line.split("=", 1)[1].strip()
+    return os.environ.get("OPENAI_API_KEY", "")
+
+
+def _gpt_parse(raw: str) -> dict:
+    raw = raw.strip()
+    if raw.startswith("```"):
+        parts = raw.split("```")
+        raw = parts[1] if len(parts) > 1 else raw
+        if raw.startswith("json"):
+            raw = raw[4:]
+    return json.loads(raw.strip())
+
+
+def _gpt_text(text: str, client) -> dict:
+    import openai
+    resp = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": _GPT_PROMPT},
+            {"role": "user", "content": f"Документ:\n{text[:8000]}"},
+        ],
+        temperature=0, max_tokens=600,
+    )
+    return _gpt_parse(resp.choices[0].message.content)
+
+
+def _gpt_vision(img_bytes: bytes, client, mime: str = "image/png") -> dict:
+    import openai, base64 as _b64
+    b64 = _b64.b64encode(img_bytes).decode()
+    resp = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": _GPT_PROMPT},
+            {"role": "user", "content": [
+                {"type": "text", "text": "Витягни реквізити з цього документу:"},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+            ]},
+        ],
+        temperature=0, max_tokens=600,
+    )
+    return _gpt_parse(resp.choices[0].message.content)
+
+
+def extract_from_file(filepath: str) -> Dict[str, str]:
+    """GPT-4o витягує реквізити з JPEG/PNG/PDF/DOCX. Повертає нормалізований dict."""
+    import openai, io
+    from PIL import Image
+    import fitz
+    import docx as _docx
+
+    api_key = _load_openai_key()
+    if not api_key:
+        raise ValueError(
+            "OPENAI_API_KEY не знайдено. Додай у D:\\Project\\tools\\.env"
+        )
+    client = openai.OpenAI(api_key=api_key)
+
+    p = Path(filepath)
+    ext = p.suffix.lower()
+
+    if ext == ".pdf":
+        doc = fitz.open(str(p))
+        text = "".join(page.get_text() for page in doc)
+        doc.close()
+        if len(text.strip()) > 100:
+            raw = _gpt_text(text, client)
+        else:
+            doc = fitz.open(str(p))
+            pix = doc[0].get_pixmap(matrix=fitz.Matrix(2, 2))
+            img_bytes = pix.tobytes("png")
+            doc.close()
+            raw = _gpt_vision(img_bytes, client, "image/png")
+
+    elif ext in (".docx", ".doc"):
+        document = _docx.Document(str(p))
+        text = "\n".join(para.text for para in document.paragraphs)
+        for table in document.tables:
+            for row in table.rows:
+                text += "\n" + " | ".join(cell.text for cell in row.cells)
+        raw = _gpt_text(text, client)
+
+    else:
+        mime_map = {
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".png": "image/png", ".tiff": "image/tiff",
+            ".tif": "image/tiff", ".bmp": "image/bmp", ".webp": "image/webp",
+        }
+        mime = mime_map.get(ext, "image/png")
+        img = Image.open(str(p))
+        if max(img.size) > 2048:
+            img.thumbnail((2048, 2048), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        raw = _gpt_vision(buf.getvalue(), client, "image/png")
+
+    # Map Ukrainian field names → internal keys via _normalize
+    data = _normalize({k: (v or "") for k, v in raw.items() if v is not None})
+    logger.info("GPT-4o extracted: name=%s edrpou=%s iban=%s",
+                data.get("name"), data.get("edrpou"), data.get("iban"))
+    return data
+
+
 def _open_text(filepath: str):
     """Open text file with BOM-based encoding detection (utf-8, utf-16, cp1251)."""
     with open(filepath, "rb") as f:
@@ -350,6 +485,8 @@ def load_records(filepath: str) -> List[Dict[str, str]]:
     ext = Path(filepath).suffix.lower()
     if ext in (".xlsx", ".xls"):
         return parse_excel(filepath)
+    if ext in VISION_EXTS:
+        return [extract_from_file(filepath)]
     # TXT/CSV/TSV: спочатку пробуємо пакетний формат
     try:
         records = parse_batch_txt(filepath)
