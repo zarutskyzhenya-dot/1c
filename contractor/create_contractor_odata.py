@@ -774,23 +774,30 @@ def _prompt_select(prompt: str, count: int):
         print(f"  Enter numbers 1-{count} comma-separated, Enter=all, 0=cancel")
 
 
-def _ask_contractors_table(new_items: list, skip_items: list, yes: bool) -> list:
+def _ask_contractors_table(new_items: list, skip_items: list, yes: bool,
+                           add_items: list = []) -> list:
+    total = len(new_items) + len(skip_items) + len(add_items)
     LINE = "=" * 68
     print(f"\n{LINE}")
-    print(f"  FOUND: {len(new_items) + len(skip_items)} record(s)")
+    print(f"  FOUND: {total} record(s)")
     print(LINE)
     for idx, c in enumerate(new_items, 1):
         print(f"  [{idx}] {c.get('name','')[:36]:<36} | EDRPOU={c.get('edrpou',''):<12} | -> will create")
-    if new_items and skip_items:
+    for c in add_items:
+        print(f"  [+] {c.get('name','')[:36]:<36} | EDRPOU={c.get('edrpou',''):<12} | -> add account")
+    if (new_items or add_items) and skip_items:
         print(f"  {'- ' * 34}")
     for c in skip_items:
         print(f"  [*] {c.get('name','')[:36]:<36} | EDRPOU={c.get('edrpou',''):<12} | already exists")
     print(LINE)
-    print(f"  Will create: {len(new_items)}  |  Skip (exists): {len(skip_items)}")
+    print(f"  Will create: {len(new_items)}  |  Add account: {len(add_items)}  |  Skip: {len(skip_items)}")
     print(LINE)
 
     if not new_items:
-        print("  All records already exist. Nothing to create.\n")
+        if add_items:
+            print("  No new contractors to create.\n")
+        else:
+            print("  All records already exist. Nothing to create.\n")
         return []
 
     if yes:
@@ -847,23 +854,57 @@ def integrate_file(filepath: str, yes: bool = False) -> List[Dict[str, str]]:
         ]
         contractors.append(base)
 
-    # Precheck 1C: split into new vs already existing
+    # Precheck 1C: split into new / add_account (exists+iban) / skip (exists, no iban)
     new_items:  list = []
     skip_items: list = []
+    add_items:  list = []
     for c in contractors:
         try:
             existing = find_contractor_by_edrpou(c.get("edrpou", ""))
         except Exception:
             existing = None
-        (skip_items if existing else new_items).append(c)
+        if not existing:
+            new_items.append(c)
+        else:
+            ibans = c.get("_ibans", [])
+            has_iban = any(ib or mf for ib, mf, _ in ibans)
+            if has_iban:
+                c["_existing_ref"] = existing.get("Ref_Key", "")
+                add_items.append(c)
+            else:
+                skip_items.append(c)
 
     # Show table + ask which to create
-    to_create = _ask_contractors_table(new_items, skip_items, yes=yes)
+    to_create = _ask_contractors_table(new_items, skip_items, yes=yes, add_items=add_items)
 
     all_results = [
         {"ContractorName": c.get("name", ""), "EDRPOU": c.get("edrpou", ""), "status": "already_exists"}
         for c in skip_items
     ]
+
+    # Add accounts to existing contractors (always, no prompt)
+    for c in add_items:
+        cref  = c.pop("_existing_ref", "")
+        ibans = c.pop("_ibans", [])
+        ibans_valid = [(ib, mf, bk) for ib, mf, bk in ibans if ib or mf]
+        added = []
+        for ib, mf, bk in ibans_valid:
+            try:
+                ref = create_bank_account(
+                    {"iban": ib, "mfo": mf, "bank": bk,
+                     "name": c.get("name", ""), "edrpou": c.get("edrpou", "")}, cref
+                )
+                added.append(ref)
+                logger.info("Account added to existing %s: %s", c.get("name"), ref)
+            except Exception as exc:
+                logger.error("Failed to add account to %s: %s", c.get("name"), exc)
+        all_results.append({
+            "ContractorName": c.get("name", ""),
+            "EDRPOU": c.get("edrpou", ""),
+            "status": "account_added" if added else "already_exists",
+            "Contractor_Ref_Key": cref + " (EXISTING)",
+            "BankAccount_Ref_Key": ", ".join(added) if added else "SKIPPED",
+        })
 
     for c in to_create:
         ibans       = c.pop("_ibans", [])
@@ -875,20 +916,9 @@ def integrate_file(filepath: str, yes: bool = False) -> List[Dict[str, str]]:
                 continue
             for key in ("iban", "mfo", "bank"):
                 c.pop(key, None)
-        elif len(ibans_valid) == 1:
-            c["iban"], c["mfo"], c["bank"] = ibans_valid[0]
         else:
-            if yes:
-                c["iban"], c["mfo"], c["bank"] = ibans_valid[0]
-                extra_ibans = ibans_valid[1:]
-            else:
-                chosen = _ask_accounts(c.get("name", ""), ibans_valid)
-                if not chosen:
-                    for key in ("iban", "mfo", "bank"):
-                        c.pop(key, None)
-                else:
-                    c["iban"], c["mfo"], c["bank"] = chosen[0]
-                    extra_ibans = chosen[1:]
+            c["iban"], c["mfo"], c["bank"] = ibans_valid[0]
+            extra_ibans = ibans_valid[1:]
 
         logger.info("── %s ──", c.get("name"))
         try:
