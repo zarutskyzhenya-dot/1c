@@ -498,6 +498,25 @@ def load_records(filepath: str) -> List[Dict[str, str]]:
     return [parse_single_txt(filepath)]
 
 
+SUPPORTED_EXTS = {".xlsx", ".xls", ".txt", ".csv", ".tsv", ".json"} | VISION_EXTS
+
+
+def load_records_from_directory(dirpath: str) -> List[Dict[str, str]]:
+    """Читає всі підтримувані файли з каталогу і повертає плоский список записів."""
+    all_records = []
+    files = sorted(Path(dirpath).iterdir())
+    for f in files:
+        if not f.is_file() or f.suffix.lower() not in SUPPORTED_EXTS:
+            continue
+        try:
+            recs = load_records(str(f))
+            all_records.extend(recs)
+            logger.info("Loaded %d record(s) from %s", len(recs), f.name)
+        except Exception as exc:
+            logger.warning("Skipped %s: %s", f.name, exc)
+    return all_records
+
+
 # ─────────────────────────── 1C integration steps ───────────────────────────
 
 def find_contractor_by_edrpou(edrpou: str) -> Optional[Dict]:
@@ -827,15 +846,21 @@ def _ask_create_without_bank(name: str) -> bool:
 
 
 def integrate_file(filepath: str, yes: bool = False) -> List[Dict[str, str]]:
-    """Load file, precheck 1C, show table, ask selection, process."""
-    if not os.path.isfile(filepath):
-        raise FileNotFoundError(f"File not found: {filepath}")
+    """Load file or directory, precheck 1C, show table, ask selection, process."""
+    if os.path.isdir(filepath):
+        records = load_records_from_directory(filepath)
+        if not records:
+            print(f"  No supported files found in: {filepath}")
+            return []
+    elif os.path.isfile(filepath):
+        records = load_records(filepath)
+    else:
+        raise FileNotFoundError(f"File or directory not found: {filepath}")
 
     if not check_connectivity():
         raise ConnectionError(f"No connection to 1C OData: {BASE_URL}")
 
-    records = load_records(filepath)
-    logger.info("Loaded %d records from %s", len(records), filepath)
+    logger.info("Loaded %d total records", len(records))
 
     # Group by EDRPOU to detect multiple IBANs for same contractor
     groups: Dict[str, list] = {}
@@ -917,8 +942,17 @@ def integrate_file(filepath: str, yes: bool = False) -> List[Dict[str, str]]:
             for key in ("iban", "mfo", "bank"):
                 c.pop(key, None)
         else:
-            c["iban"], c["mfo"], c["bank"] = ibans_valid[0]
-            extra_ibans = ibans_valid[1:]
+            if yes:
+                c["iban"], c["mfo"], c["bank"] = ibans_valid[0]
+                extra_ibans = ibans_valid[1:]
+            else:
+                chosen = _ask_accounts(c.get("name", ""), ibans_valid)
+                if not chosen:
+                    for key in ("iban", "mfo", "bank"):
+                        c.pop(key, None)
+                else:
+                    c["iban"], c["mfo"], c["bank"] = chosen[0]
+                    extra_ibans = chosen[1:]
 
         logger.info("── %s ──", c.get("name"))
         try:

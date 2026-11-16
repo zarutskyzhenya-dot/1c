@@ -40,19 +40,16 @@ if "!FOUND!"=="0" (
 )
 
 echo.
-echo Processing files from input\ ...
+echo Processing input\ folder ...
 echo.
 
-for %%F in ("%INPUT_DIR%\*.*") do (
-    if /i not "%%~xF"==".log" (
-        echo ========================================
-        echo  File: %%~nxF
-        echo ========================================
-        C:\Python311-32\python.exe create_contractor_odata.py "%%F" --db Vlada2 --yes
-        echo.
-        set /p "DEL=Delete files from input? 1=yes / 0=no: "
-        if "!DEL!"=="1" del "%%F"
-        echo.
+C:\Python311-32\python.exe create_contractor_odata.py "%INPUT_DIR%" --db Vlada2
+
+echo.
+set /p "DEL=Delete processed files? 1=yes / 0=no: "
+if "!DEL!"=="1" (
+    for %%F in ("%INPUT_DIR%\*.*") do (
+        if /i not "%%~xF"==".log" del "%%F"
     )
 )
 
