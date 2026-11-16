@@ -754,30 +754,163 @@ def integrate_data(data: Dict[str, str]) -> Dict[str, str]:
     return results
 
 
-def integrate_file(filepath: str) -> List[Dict[str, str]]:
-    """Завантажує файл і обробляє всі записи."""
+# ─────────────────────────── Interactive prompts ─────────────────────────────
+
+def _prompt_select(prompt: str, count: int):
+    """Returns list of 0-based indices, or None if cancelled (input 0)."""
+    while True:
+        raw = input(prompt).strip()
+        if raw == "0":
+            return None
+        if raw == "":
+            return list(range(count))
+        try:
+            chosen = [int(p.strip()) - 1 for p in raw.split(",") if p.strip()]
+            valid  = [i for i in chosen if 0 <= i < count]
+            if valid:
+                return valid
+        except ValueError:
+            pass
+        print(f"  Enter numbers 1-{count} comma-separated, Enter=all, 0=cancel")
+
+
+def _ask_contractors_table(new_items: list, skip_items: list, yes: bool) -> list:
+    LINE = "=" * 68
+    print(f"\n{LINE}")
+    print(f"  FOUND: {len(new_items) + len(skip_items)} record(s)")
+    print(LINE)
+    for idx, c in enumerate(new_items, 1):
+        print(f"  [{idx}] {c.get('name','')[:36]:<36} | EDRPOU={c.get('edrpou',''):<12} | -> will create")
+    if new_items and skip_items:
+        print(f"  {'- ' * 34}")
+    for c in skip_items:
+        print(f"  [*] {c.get('name','')[:36]:<36} | EDRPOU={c.get('edrpou',''):<12} | already exists")
+    print(LINE)
+    print(f"  Will create: {len(new_items)}  |  Skip (exists): {len(skip_items)}")
+    print(LINE)
+
+    if not new_items:
+        print("  All records already exist. Nothing to create.\n")
+        return []
+
+    if yes:
+        print("  --yes: creating all new records automatically.\n")
+        return new_items
+
+    idx = _prompt_select(f"Create: Enter=all / 1-{len(new_items)} / 0=cancel\n> ", len(new_items))
+    return [] if idx is None else [new_items[i] for i in idx]
+
+
+def _ask_accounts(name: str, ibans: list) -> list:
+    print()
+    print(f"  Accounts for {name}:")
+    for i, (iban, mfo, bank) in enumerate(ibans, 1):
+        print(f"    [{i}] {iban or '-':<34} MFO {mfo or '-':<8} {(bank or '-')[:20]}")
+    print()
+    idx = _prompt_select(f"Select: Enter=all / 1-{len(ibans)} / 0=skip accounts\n> ", len(ibans))
+    return [] if idx is None else [ibans[i] for i in idx]
+
+
+def _ask_create_without_bank(name: str) -> bool:
+    print()
+    print(f"  No bank account found. Create {name[:40]} without?")
+    print("  Enter=yes / 0=skip")
+    raw = input("> ").strip()
+    return raw != "0"
+
+
+def integrate_file(filepath: str, yes: bool = False) -> List[Dict[str, str]]:
+    """Load file, precheck 1C, show table, ask selection, process."""
     if not os.path.isfile(filepath):
-        raise FileNotFoundError(f"Файл не знайдено: {filepath}")
+        raise FileNotFoundError(f"File not found: {filepath}")
 
     if not check_connectivity():
-        raise ConnectionError(f"Немає зв'язку з 1С OData: {BASE_URL}")
+        raise ConnectionError(f"No connection to 1C OData: {BASE_URL}")
 
     records = load_records(filepath)
-    logger.info("Завантажено %d записів з %s", len(records), filepath)
+    logger.info("Loaded %d records from %s", len(records), filepath)
 
-    all_results = []
-    for i, data in enumerate(records, start=1):
-        logger.info("── Запис %d/%d: %s ──", i, len(records), data.get("name"))
+    # Group by EDRPOU to detect multiple IBANs for same contractor
+    groups: Dict[str, list] = {}
+    for rec in records:
+        key = rec.get("edrpou", "")
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(rec)
+
+    contractors = []
+    for edrpou, recs in groups.items():
+        base = recs[0].copy()
+        base["_ibans"] = [
+            (r.get("iban", "").replace(" ", ""), r.get("mfo", ""), r.get("bank", ""))
+            for r in recs
+        ]
+        contractors.append(base)
+
+    # Precheck 1C: split into new vs already existing
+    new_items:  list = []
+    skip_items: list = []
+    for c in contractors:
         try:
-            result = integrate_data(data)
+            existing = find_contractor_by_edrpou(c.get("edrpou", ""))
+        except Exception:
+            existing = None
+        (skip_items if existing else new_items).append(c)
+
+    # Show table + ask which to create
+    to_create = _ask_contractors_table(new_items, skip_items, yes=yes)
+
+    all_results = [
+        {"ContractorName": c.get("name", ""), "EDRPOU": c.get("edrpou", ""), "status": "already_exists"}
+        for c in skip_items
+    ]
+
+    for c in to_create:
+        ibans       = c.pop("_ibans", [])
+        ibans_valid = [(iban, mfo, bank) for iban, mfo, bank in ibans if iban or mfo]
+        extra_ibans: list = []
+
+        if not ibans_valid:
+            if not yes and not _ask_create_without_bank(c.get("name", "")):
+                continue
+            for key in ("iban", "mfo", "bank"):
+                c.pop(key, None)
+        elif len(ibans_valid) == 1:
+            c["iban"], c["mfo"], c["bank"] = ibans_valid[0]
+        else:
+            if yes:
+                c["iban"], c["mfo"], c["bank"] = ibans_valid[0]
+                extra_ibans = ibans_valid[1:]
+            else:
+                chosen = _ask_accounts(c.get("name", ""), ibans_valid)
+                if not chosen:
+                    for key in ("iban", "mfo", "bank"):
+                        c.pop(key, None)
+                else:
+                    c["iban"], c["mfo"], c["bank"] = chosen[0]
+                    extra_ibans = chosen[1:]
+
+        logger.info("── %s ──", c.get("name"))
+        try:
+            result = integrate_data(c)
+            if extra_ibans and not result.get("Contractor_Ref_Key", "").endswith("(EXISTING)"):
+                cref = result["Contractor_Ref_Key"]
+                result["ExtraBankAccounts"] = [
+                    create_bank_account(
+                        {"iban": ib, "mfo": mf, "bank": bk,
+                         "name": c["name"], "edrpou": c["edrpou"]}, cref
+                    )
+                    for ib, mf, bk in extra_ibans
+                ]
         except Exception as exc:
-            logger.error("Помилка запису %d (%s): %s", i, data.get("name"), exc)
+            logger.error("Error %s: %s", c.get("name"), exc)
             result = {
-                "ContractorName": data.get("name", ""),
-                "EDRPOU": data.get("edrpou", ""),
+                "ContractorName": c.get("name", ""),
+                "EDRPOU": c.get("edrpou", ""),
                 "status": f"ERROR: {exc}",
             }
         all_results.append(result)
+
     return all_results
 
 
@@ -839,6 +972,8 @@ def main() -> None:
                         help="Створити зразок файлів і вийти")
     parser.add_argument("--check-only", action="store_true",
                         help="Тільки перевірити підключення до 1С")
+    parser.add_argument("--yes", "-y", action="store_true",
+                        help="Skip confirmation — create all new records automatically")
     parser.add_argument("--debug",    action="store_true", help="Детальний лог")
 
     args = parser.parse_args()
@@ -873,7 +1008,7 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        all_results = integrate_file(args.input_file)
+        all_results = integrate_file(args.input_file, yes=args.yes)
         print_summary(all_results)
         errors = [r for r in all_results if r.get("status", "").startswith("ERROR")]
         sys.exit(1 if errors else 0)
