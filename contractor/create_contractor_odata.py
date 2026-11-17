@@ -218,12 +218,13 @@ _GPT_PROMPT = """Ти — асистент для витягування рек�
   "тип": "ТОВ або ФОП або ПП або null",
   "єдрпоу": "рівно 8 цифр без пробілів або null",
   "інн": "ІПН платника ПДВ 10-12 цифр або null",
-  "iban": "UA + 27 цифр, разом 29 символів або null",
-  "мфо": "рівно 6 цифр або null",
-  "банк": "назва банку або null",
   "телефон": "+380... або null",
-  "адреса": "юридична адреса або null"
+  "адреса": "юридична адреса або null",
+  "рахунки": [
+    {"iban": "UA + 27 цифр, разом 29 символів або null", "мфо": "рівно 6 цифр або null", "банк": "назва банку або null"}
+  ]
 }
+Якщо рахунків кілька — додай всі в масив рахунки. Якщо рахунку немає — рахунки: [].
 Якщо поле не знайдено — null. Тільки JSON."""
 
 
@@ -328,11 +329,33 @@ def extract_from_file(filepath: str) -> Dict[str, str]:
         img.save(buf, format="PNG")
         raw = _gpt_vision(buf.getvalue(), client, "image/png")
 
-    # Map Ukrainian field names → internal keys via _normalize
-    data = _normalize({k: (v or "") for k, v in raw.items() if v is not None})
-    logger.info("GPT-4o extracted: name=%s edrpou=%s iban=%s",
-                data.get("name"), data.get("edrpou"), data.get("iban"))
-    return data
+    # Extract base fields (without accounts)
+    base_fields = {k: (v or "") for k, v in raw.items()
+                   if v is not None and k not in ("рахунки", "iban", "мфо", "банк")}
+    base = _normalize(base_fields)
+
+    # Parse рахунки list (new format) or fall back to single iban/мфо/банк
+    рахунки = raw.get("рахунки") or []
+    if not рахунки:
+        # backward compat: old single-field format
+        рахунки = [{"iban": raw.get("iban"), "мфо": raw.get("мфо"), "банк": raw.get("банк")}]
+
+    records = []
+    for acc in рахунки:
+        if not isinstance(acc, dict):
+            continue
+        rec = base.copy()
+        rec["iban"] = str(acc.get("iban") or "").replace(" ", "").upper()
+        rec["mfo"]  = str(acc.get("мфо")  or acc.get("mfo")  or "")
+        rec["bank"] = str(acc.get("банк") or acc.get("bank") or "")
+        records.append(rec)
+
+    if not records:
+        records = [base]
+
+    logger.info("GPT-4o extracted: name=%s edrpou=%s accounts=%d",
+                base.get("name"), base.get("edrpou"), len(records))
+    return records
 
 
 def _open_text(filepath: str):
@@ -486,7 +509,7 @@ def load_records(filepath: str) -> List[Dict[str, str]]:
     if ext in (".xlsx", ".xls"):
         return parse_excel(filepath)
     if ext in VISION_EXTS:
-        return [extract_from_file(filepath)]
+        return extract_from_file(filepath)
     # TXT/CSV/TSV: спочатку пробуємо пакетний формат
     try:
         records = parse_batch_txt(filepath)
