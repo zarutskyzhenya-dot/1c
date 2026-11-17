@@ -807,7 +807,8 @@ def _ask_contractors_table(new_items: list, skip_items: list, yes: bool,
     if (new_items or add_items) and skip_items:
         print(f"  {'- ' * 34}")
     for c in skip_items:
-        print(f"  [*] {c.get('name','')[:36]:<36} | EDRPOU={c.get('edrpou',''):<12} | already exists")
+        reason = "no EDRPOU" if not c.get("edrpou", "").strip() else "already exists"
+        print(f"  [*] {c.get('name','')[:36]:<36} | EDRPOU={c.get('edrpou',''):<12} | {reason}")
     print(LINE)
     print(f"  Will create: {len(new_items)}  |  Add account: {len(add_items)}  |  Skip: {len(skip_items)}")
     print(LINE)
@@ -884,8 +885,13 @@ def integrate_file(filepath: str, yes: bool = False) -> List[Dict[str, str]]:
     skip_items: list = []
     add_items:  list = []
     for c in contractors:
+        edrpou = c.get("edrpou", "").strip()
+        if not edrpou:
+            logger.warning("Skipping record with no EDRPOU: %s", c.get("name", "?"))
+            skip_items.append(c)
+            continue
         try:
-            existing = find_contractor_by_edrpou(c.get("edrpou", ""))
+            existing = find_contractor_by_edrpou(edrpou)
         except Exception:
             existing = None
         if not existing:
@@ -988,7 +994,7 @@ def print_summary(all_results: List[Dict[str, str]]) -> None:
         status = results.get("status", "?")
         name   = results.get("ContractorName", "")
         edrpou = results.get("EDRPOU", "")
-        icon   = "✓" if status in ("created", "already_exists") else "✗"
+        icon   = "✓" if status in ("created", "already_exists", "account_added") else "✗"
         print(f"\n  [{i}] {icon} {name} | ЄДРПОУ={edrpou} | {status}")
         for key, value in results.items():
             if key not in ("ContractorName", "EDRPOU", "status"):
