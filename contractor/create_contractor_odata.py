@@ -913,13 +913,37 @@ def integrate_file(filepath: str, yes: bool = False) -> List[Dict[str, str]]:
         for c in skip_items
     ]
 
-    # Add accounts to existing contractors (always, no prompt)
+    # Add accounts to existing contractors (ask if 2+ IBANs)
     for c in add_items:
         cref  = c.pop("_existing_ref", "")
         ibans = c.pop("_ibans", [])
         ibans_valid = [(ib, mf, bk) for ib, mf, bk in ibans if ib or mf]
+
+        if not ibans_valid:
+            all_results.append({
+                "ContractorName": c.get("name", ""),
+                "EDRPOU": c.get("edrpou", ""),
+                "status": "already_exists",
+                "Contractor_Ref_Key": cref + " (EXISTING)",
+            })
+            continue
+
+        if yes or len(ibans_valid) == 1:
+            to_add = ibans_valid
+        else:
+            to_add = _ask_accounts(c.get("name", ""), ibans_valid)
+            if not to_add:
+                all_results.append({
+                    "ContractorName": c.get("name", ""),
+                    "EDRPOU": c.get("edrpou", ""),
+                    "status": "already_exists",
+                    "Contractor_Ref_Key": cref + " (EXISTING)",
+                    "BankAccount_Ref_Key": "SKIPPED by user",
+                })
+                continue
+
         added = []
-        for ib, mf, bk in ibans_valid:
+        for ib, mf, bk in to_add:
             try:
                 ref = create_bank_account(
                     {"iban": ib, "mfo": mf, "bank": bk,
