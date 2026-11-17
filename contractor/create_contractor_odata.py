@@ -653,6 +653,26 @@ def create_contractor(data: Dict[str, str], partner_ref: str) -> str:
     return ref_key
 
 
+def find_bank_accounts_by_contractor(contractor_ref: str) -> List[str]:
+    """Returns normalized IBANs already in 1C for this contractor (dedup guard)."""
+    try:
+        resp = _get("Catalog_БанковскиеСчетаКонтрагентов", params={
+            "$format": "json", "$top": "50", "$select": "НомерСчета,Owner_Key",
+        })
+        items = _extract_value(resp) or []
+        if not isinstance(items, list):
+            return []
+        return [
+            str(item.get("НомерСчета", "")).replace(" ", "").upper()
+            for item in items
+            if item.get("Owner_Key", "").lower() == contractor_ref.lower()
+            and item.get("НомерСчета")
+        ]
+    except Exception as exc:
+        logger.warning("Could not fetch existing bank accounts: %s", exc)
+        return []
+
+
 def create_bank_account(data: Dict[str, str], contractor_ref: str) -> str:
     iban      = data.get("iban", "").replace(" ", "")
     mfo       = data.get("mfo", "")
@@ -863,21 +883,28 @@ def integrate_file(filepath: str, yes: bool = False) -> List[Dict[str, str]]:
 
     logger.info("Loaded %d total records", len(records))
 
-    # Group by EDRPOU to detect multiple IBANs for same contractor
+    # Group by EDRPOU — same EDRPOU = same contractor, possibly multiple IBANs
     groups: Dict[str, list] = {}
     for rec in records:
-        key = rec.get("edrpou", "")
-        if key not in groups:
-            groups[key] = []
-        groups[key].append(rec)
+        key = rec.get("edrpou", "").strip()
+        groups.setdefault(key, []).append(rec)
 
     contractors = []
     for edrpou, recs in groups.items():
+        # Normalize IBANs: strip spaces, upper-case
+        for r in recs:
+            r["iban"] = r.get("iban", "").replace(" ", "").upper()
         base = recs[0].copy()
-        base["_ibans"] = [
-            (r.get("iban", "").replace(" ", ""), r.get("mfo", ""), r.get("bank", ""))
-            for r in recs
-        ]
+        # Deduplicate IBANs within group (same IBAN from multiple files)
+        seen: set = set()
+        unique_ibans = []
+        for r in recs:
+            iban = r.get("iban", "")
+            key_iban = iban or r.get("mfo", "")
+            if key_iban and key_iban not in seen:
+                seen.add(key_iban)
+                unique_ibans.append((iban, r.get("mfo", ""), r.get("bank", "")))
+        base["_ibans"] = unique_ibans
         contractors.append(base)
 
     # Precheck 1C: split into new / add_account (exists+iban) / skip (exists, no iban)
@@ -942,8 +969,12 @@ def integrate_file(filepath: str, yes: bool = False) -> List[Dict[str, str]]:
                 })
                 continue
 
+        existing_ibans = find_bank_accounts_by_contractor(cref)
         added = []
         for ib, mf, bk in to_add:
+            if ib and ib.upper() in existing_ibans:
+                logger.info("IBAN %s already exists for %s — skipping", ib, c.get("name"))
+                continue
             try:
                 ref = create_bank_account(
                     {"iban": ib, "mfo": mf, "bank": bk,
@@ -1010,20 +1041,44 @@ def integrate_file(filepath: str, yes: bool = False) -> List[Dict[str, str]]:
 
 # ─────────────────────────── Output ──────────────────────────────────────────
 
+_STATUS_LABEL = {
+    "created":        "Created",
+    "already_exists": "Already exists",
+    "account_added":  "Account added",
+}
+
+def _count_accounts(r: Dict) -> int:
+    bank = r.get("BankAccount_Ref_Key", "")
+    if not bank or "SKIP" in bank:
+        return 0
+    primary = len([x for x in bank.split(",") if x.strip()])
+    extra = len(r.get("ExtraBankAccounts") or [])
+    return primary + extra
+
+
 def print_summary(all_results: List[Dict[str, str]]) -> None:
-    print("\n" + "=" * 60)
-    print(f"  РЕЗУЛЬТАТ: {len(all_results)} запис(ів)")
-    print("=" * 60)
-    for i, results in enumerate(all_results, start=1):
-        status = results.get("status", "?")
-        name   = results.get("ContractorName", "")
-        edrpou = results.get("EDRPOU", "")
+    created  = sum(1 for r in all_results if r.get("status") == "created")
+    added    = sum(1 for r in all_results if r.get("status") == "account_added")
+    skipped  = sum(1 for r in all_results if r.get("status") == "already_exists")
+    errors   = sum(1 for r in all_results if str(r.get("status","")).startswith("ERROR"))
+
+    LINE = "=" * 68
+    print(f"\n{LINE}")
+    print(f"  DONE: {len(all_results)}  |  Created: {created}  |  "
+          f"Accounts added: {added}  |  Skipped: {skipped}  |  Errors: {errors}")
+    print(LINE)
+
+    for r in all_results:
+        status = r.get("status", "?")
+        name   = r.get("ContractorName", "")[:42]
+        edrpou = r.get("EDRPOU", "")
         icon   = "✓" if status in ("created", "already_exists", "account_added") else "✗"
-        print(f"\n  [{i}] {icon} {name} | ЄДРПОУ={edrpou} | {status}")
-        for key, value in results.items():
-            if key not in ("ContractorName", "EDRPOU", "status"):
-                print(f"      {key:<28}: {value}")
-    print("=" * 60 + "\n")
+        label  = _STATUS_LABEL.get(status, status)
+        accts  = _count_accounts(r)
+        acct_s = f"  ({accts} account{'s' if accts != 1 else ''})" if accts else ""
+        print(f"  {icon} {name:<42} EDRPOU={edrpou:<12} {label}{acct_s}")
+
+    print(LINE + "\n")
 
 
 # ─────────────────────────── Sample files ────────────────────────────────────
