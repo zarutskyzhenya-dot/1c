@@ -188,8 +188,8 @@ def get_bank_klassif_ref(mfo: str) -> str:
             "$top": "100", "$skip": str(skip),
             "$format": "json", "$select": "Ref_Key,Code,DeletionMark",
         })
-        items = resp.get("value", resp) if isinstance(resp, dict) else resp
-        if not items:
+        items = _extract_value(resp)
+        if not isinstance(items, list) or not items:
             break
         for item in items:
             if item.get("DeletionMark"):
@@ -255,7 +255,7 @@ def _gpt_text(text: str, client) -> dict:
             {"role": "system", "content": _GPT_PROMPT},
             {"role": "user", "content": f"Документ:\n{text[:8000]}"},
         ],
-        temperature=0, max_tokens=600,
+        temperature=0, max_tokens=1500,
     )
     return _gpt_parse(resp.choices[0].message.content)
 
@@ -272,7 +272,7 @@ def _gpt_vision(img_bytes: bytes, client, mime: str = "image/png") -> dict:
                 {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
             ]},
         ],
-        temperature=0, max_tokens=600,
+        temperature=0, max_tokens=1500,
     )
     return _gpt_parse(resp.choices[0].message.content)
 
@@ -679,9 +679,18 @@ def create_contractor(data: Dict[str, str], partner_ref: str) -> str:
 def find_bank_accounts_by_contractor(contractor_ref: str) -> List[str]:
     """Returns normalized IBANs already in 1C for this contractor (dedup guard)."""
     try:
-        resp = _get("Catalog_БанковскиеСчетаКонтрагентов", params={
-            "$format": "json", "$top": "50", "$select": "НомерСчета,Owner_Key",
-        })
+        # Try server-side filter first; some 1C instances return HTTP 500 for $filter
+        try:
+            resp = _get("Catalog_БанковскиеСчетаКонтрагентов", params={
+                "$format": "json", "$top": "200",
+                "$select": "НомерСчета,Owner_Key",
+                "$filter": f"Owner_Key eq guid'{contractor_ref}'",
+            })
+        except Exception:
+            resp = _get("Catalog_БанковскиеСчетаКонтрагентов", params={
+                "$format": "json", "$top": "1000",
+                "$select": "НомерСчета,Owner_Key",
+            })
         items = _extract_value(resp) or []
         if not isinstance(items, list):
             return []
@@ -923,9 +932,12 @@ def integrate_file(filepath: str, yes: bool = False) -> List[Dict[str, str]]:
         unique_ibans = []
         for r in recs:
             iban = r.get("iban", "")
-            key_iban = iban or r.get("mfo", "")
-            if key_iban and key_iban not in seen:
-                seen.add(key_iban)
+            if iban:
+                if iban not in seen:
+                    seen.add(iban)
+                    unique_ibans.append((iban, r.get("mfo", ""), r.get("bank", "")))
+            else:
+                # No IBAN — always include (two accounts without IBAN may be different)
                 unique_ibans.append((iban, r.get("mfo", ""), r.get("bank", "")))
         base["_ibans"] = unique_ibans
         contractors.append(base)
