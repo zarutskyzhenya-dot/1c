@@ -672,15 +672,31 @@ def load_records(filepath: str) -> List[Dict[str, str]]:
         return parse_excel(filepath)
     if ext in VISION_EXTS:
         return extract_from_file(filepath)
-    # TXT/CSV/TSV: спочатку пробуємо пакетний формат
+    # TXT/CSV/TSV: спочатку пробуємо структурні формати
     try:
         records = parse_batch_txt(filepath)
         if records:
             return records
     except Exception:
         pass
-    # fallback: одиночний запис
-    return [parse_single_txt(filepath)]
+    try:
+        return [parse_single_txt(filepath)]
+    except Exception:
+        pass
+    # Fallback: вільний текст → GPT (повідомлення, рахунки-фактури тощо)
+    logger.info("Structured parsers failed, using GPT for free-form text: %s", Path(filepath).name)
+    import openai as _openai
+    _api_key = _load_openai_key()
+    if not _api_key:
+        raise ValueError("OPENAI_API_KEY не знайдено. Додай у D:\\Project\\tools\\.env")
+    _client = _openai.OpenAI(api_key=_api_key)
+    with _open_text(filepath) as _fh:
+        _text = _fh.read()
+    _raw = _gpt_text(_text, _client)
+    _raw = _inject_regex_ibans(_raw, _text)
+    _data = _normalize(_raw)
+    _validate(_data)
+    return [_data]
 
 
 SUPPORTED_EXTS = {".xlsx", ".xls", ".txt", ".csv", ".tsv", ".json"} | VISION_EXTS
