@@ -325,6 +325,9 @@ def _claude_or_vision(img_bytes: bytes, mime: str) -> dict:
         if resp.status_code != 200:
             logger.warning("Claude OR vision HTTP %s: %s", resp.status_code, resp.text[:300])
             return {}
+        if not resp.text.strip():
+            logger.warning("Claude OR vision: empty response body, HTTP %s", resp.status_code)
+            return {}
         data = resp.json()
         content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
         if not content:
@@ -345,7 +348,7 @@ def _gemini_vision(img_bytes: bytes, mime: str) -> dict:
     b64 = _b64.b64encode(img_bytes).decode()
     try:
         resp = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gem_key}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gem_key}",
             headers={"Content-Type": "application/json"},
             json={
                 "contents": [{"parts": [
