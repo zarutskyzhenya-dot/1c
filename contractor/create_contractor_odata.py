@@ -345,7 +345,10 @@ def extract_from_file(filepath: str) -> Dict[str, str]:
         if not isinstance(acc, dict):
             continue
         rec = base.copy()
-        rec["iban"] = str(acc.get("iban") or "").replace(" ", "").upper()
+        raw_iban = str(acc.get("iban") or "").replace(" ", "").upper()
+        # Extract clean UA+27 from noisy OCR (e.g. "NeUA663...346" → "UA663...346")
+        m = re.search(r'UA\d{27}', raw_iban)
+        rec["iban"] = m.group(0) if m else raw_iban
         rec["mfo"]  = str(acc.get("мфо")  or acc.get("mfo")  or "")
         rec["bank"] = str(acc.get("банк") or acc.get("bank") or "")
         records.append(rec)
