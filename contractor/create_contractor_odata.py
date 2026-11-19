@@ -880,11 +880,16 @@ def _ask_contractors_table(new_items: list, skip_items: list, yes: bool,
     return [] if idx is None else [new_items[i] for i in idx]
 
 
+def _iban_ok(iban: str) -> bool:
+    return bool(re.match(r'^UA\d{27}$', iban)) if iban else True
+
+
 def _ask_accounts(name: str, ibans: list) -> list:
     print()
     print(f"  Accounts for {name}:")
     for i, (iban, mfo, bank) in enumerate(ibans, 1):
-        print(f"    [{i}] {iban or '-':<34} MFO {mfo or '-':<8} {(bank or '-')[:20]}")
+        warn = f"  ⚠ {len(iban)} chars, expected 29" if iban and not _iban_ok(iban) else ""
+        print(f"    [{i}] {iban or '-':<34} MFO {mfo or '-':<8} {(bank or '-')[:20]}{warn}")
     print()
     idx = _prompt_select(f"Select: Enter=all / 1-{len(ibans)} / 0=skip accounts\n> ", len(ibans))
     return [] if idx is None else [ibans[i] for i in idx]
