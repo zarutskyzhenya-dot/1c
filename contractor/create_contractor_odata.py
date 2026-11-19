@@ -216,7 +216,7 @@ _GPT_PROMPT = """Ти — асистент для витягування рек�
 {
   "назва": "повна юридична назва підприємства",
   "тип": "ТОВ або ФОП або ПП або null",
-  "єдрпоу": "8 цифр (ТОВ/ПП) або 10 цифр (ФОП/ІПН/РНОКПП) без пробілів або null. Може бути підписано: ЄДРПОУ, КОД, ІПН, РНОКПП, код ЄДРПОУ",
+  "єдрпоу": "РІВНО 8 цифр для ТОВ/ПП/АТ, або РІВНО 10 цифр для ФОП. Може бути підписано: ЄДРПОУ, КОД, ІПН, РНОКПП. Без пробілів. Якщо не 8 і не 10 — null",
   "інн": "ІПН платника ПДВ 10-12 цифр або null",
   "телефон": "+380... або null",
   "адреса": "юридична адреса або null",
@@ -229,13 +229,17 @@ _GPT_PROMPT = """Ти — асистент для витягування рек�
 Якщо поле не знайдено — null. Тільки JSON."""
 
 
-def _load_openai_key() -> str:
+def _load_api_key(name: str) -> str:
     env_file = Path(r"D:\Project\tools\.env")
     if env_file.exists():
         for line in env_file.read_text(encoding="utf-8").splitlines():
-            if line.startswith("OPENAI_API_KEY="):
+            if line.startswith(f"{name}="):
                 return line.split("=", 1)[1].strip()
-    return os.environ.get("OPENAI_API_KEY", "")
+    return os.environ.get(name, "")
+
+
+def _load_openai_key() -> str:
+    return _load_api_key("OPENAI_API_KEY")
 
 
 def _gpt_parse(raw: str) -> dict:
@@ -294,6 +298,116 @@ def _inject_regex_ibans(raw: dict, text: str) -> dict:
     return raw
 
 
+def _claude_or_vision(img_bytes: bytes, mime: str) -> dict:
+    """Claude claude-sonnet via OpenRouter — better for long digit strings."""
+    or_key = _load_api_key("OPENROUTER_API_KEY")
+    if not or_key:
+        return {}
+    import base64 as _b64
+    b64 = _b64.b64encode(img_bytes).decode()
+    try:
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {or_key}", "Content-Type": "application/json"},
+            json={
+                "model": "anthropic/claude-sonnet-4-6",
+                "messages": [
+                    {"role": "system", "content": _GPT_PROMPT},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": "Витягни реквізити з цього документу:"},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                    ]},
+                ],
+                "max_tokens": 1500, "temperature": 0,
+            },
+            timeout=60,
+        )
+        return _gpt_parse(resp.json()["choices"][0]["message"]["content"])
+    except Exception as exc:
+        logger.warning("Claude OR vision failed: %s", exc)
+        return {}
+
+
+def _gemini_vision(img_bytes: bytes, mime: str) -> dict:
+    """Gemini 2.0 Flash — fast fallback for IBAN extraction."""
+    gem_key = _load_api_key("GEMINI_API_KEY")
+    if not gem_key:
+        return {}
+    import base64 as _b64
+    b64 = _b64.b64encode(img_bytes).decode()
+    try:
+        resp = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gem_key}",
+            headers={"Content-Type": "application/json"},
+            json={
+                "contents": [{"parts": [
+                    {"text": _GPT_PROMPT + "\n\nВитягни реквізити з цього документу:"},
+                    {"inline_data": {"mime_type": mime, "data": b64}},
+                ]}],
+                "generationConfig": {"temperature": 0, "maxOutputTokens": 1500},
+            },
+            timeout=60,
+        )
+        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        return _gpt_parse(text)
+    except Exception as exc:
+        logger.warning("Gemini vision failed: %s", exc)
+        return {}
+
+
+def _ibans_valid(рахунки: list) -> bool:
+    """True if all non-empty IBANs are valid 29-char format."""
+    for acc in рахунки:
+        if isinstance(acc, dict):
+            iban = str(acc.get("iban") or "").replace(" ", "").upper()
+            if iban and not re.match(r'^UA\d{27}$', iban):
+                return False
+    return True
+
+
+def _merge_ibans(base: dict, retry: dict) -> dict:
+    """Replace invalid IBANs in base with valid ones from retry model."""
+    base_рахунки = base.get("рахунки") or []
+    retry_рахунки = retry.get("рахунки") or []
+    if not retry_рахунки:
+        return base
+    merged = []
+    for i, acc in enumerate(base_рахунки):
+        acc = dict(acc) if isinstance(acc, dict) else {}
+        base_iban = str(acc.get("iban") or "").replace(" ", "").upper()
+        m = re.search(r'UA\d{27}', base_iban)
+        base_iban = m.group(0) if m else base_iban
+        if not re.match(r'^UA\d{27}$', base_iban) and i < len(retry_рахунки):
+            r_acc = retry_рахунки[i] if isinstance(retry_рахунки[i], dict) else {}
+            r_iban = str(r_acc.get("iban") or "").replace(" ", "").upper()
+            rm = re.search(r'UA\d{27}', r_iban)
+            r_iban = rm.group(0) if rm else r_iban
+            if re.match(r'^UA\d{27}$', r_iban):
+                acc["iban"] = r_iban
+                logger.info("IBAN corrected by fallback model: %s", r_iban)
+        merged.append(acc)
+    for i in range(len(base_рахунки), len(retry_рахунки)):
+        merged.append(retry_рахунки[i])
+    return {**base, "рахунки": merged}
+
+
+def _retry_vision_ibans(raw: dict, img_bytes: bytes, mime: str) -> dict:
+    """Auto-retry with Claude then Gemini if any IBAN is invalid."""
+    рахунки = raw.get("рахунки") or []
+    if _ibans_valid(рахунки):
+        return raw
+    logger.info("Invalid IBAN — retrying with Claude claude-sonnet...")
+    raw_claude = _claude_or_vision(img_bytes, mime)
+    if raw_claude:
+        raw = _merge_ibans(raw, raw_claude)
+    if not _ibans_valid(raw.get("рахунки") or []):
+        logger.info("IBAN still invalid — retrying with Gemini...")
+        raw_gemini = _gemini_vision(img_bytes, mime)
+        if raw_gemini:
+            raw = _merge_ibans(raw, raw_gemini)
+    return raw
+
+
 def extract_from_file(filepath: str) -> Dict[str, str]:
     """GPT-4o витягує реквізити з JPEG/PNG/PDF/DOCX. Повертає нормалізований dict."""
     import openai, io
@@ -324,6 +438,7 @@ def extract_from_file(filepath: str) -> Dict[str, str]:
             img_bytes = pix.tobytes("png")
             doc.close()
             raw = _gpt_vision(img_bytes, client, "image/png")
+            raw = _retry_vision_ibans(raw, img_bytes, "image/png")
 
     elif ext in (".docx", ".doc"):
         document = _docx.Document(str(p))
@@ -345,7 +460,9 @@ def extract_from_file(filepath: str) -> Dict[str, str]:
             img.thumbnail((2048, 2048), Image.LANCZOS)
         buf = io.BytesIO()
         img.save(buf, format="PNG")
-        raw = _gpt_vision(buf.getvalue(), client, "image/png")
+        img_bytes = buf.getvalue()
+        raw = _gpt_vision(img_bytes, client, "image/png")
+        raw = _retry_vision_ibans(raw, img_bytes, "image/png")
 
     # Extract base fields (without accounts)
     base_fields = {k: (v or "") for k, v in raw.items()
@@ -411,6 +528,9 @@ def _normalize(raw: Dict) -> Dict[str, str]:
     for k, v in raw.items():
         key = FIELD_ALIASES.get(str(k).strip().lower(), str(k).strip().lower())
         out[key] = str(v).strip() if v is not None else ""
+    # ЄДРПОУ must be exactly 8 or 10 digits — clear if wrong length (OCR artifact)
+    edrpou = re.sub(r'\D', '', out.get("edrpou", ""))
+    out["edrpou"] = edrpou if len(edrpou) in (8, 10) else ""
     return out
 
 
