@@ -348,11 +348,12 @@ def _claude_or_vision(img_bytes: bytes, mime: str) -> dict:
                 "messages": [
                     {"role": "system", "content": _GPT_PROMPT},
                     {"role": "user", "content": [
-                        {"type": "text", "text": "Витягни реквізити з цього документу:"},
+                        {"type": "text", "text": "Витягни реквізити з цього документу. ВІДПОВІДЬ ТІЛЬКИ JSON БЕЗ ПОЯСНЕНЬ:"},
                         {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
                     ]},
                 ],
                 "max_tokens": 1500, "temperature": 0,
+                "response_format": {"type": "json_object"},
             },
             timeout=60,
         )
@@ -787,6 +788,8 @@ def load_records_from_directory(dirpath: str) -> List[Dict[str, str]]:
             continue
         try:
             recs = load_records(str(f))
+            for rec in recs:
+                rec["_source_file"] = str(f)
             all_records.extend(recs)
             logger.info("Loaded %d record(s) from %s", len(recs), f.name)
         except Exception as exc:
@@ -1343,6 +1346,31 @@ def integrate_file(filepath: str, yes: bool = False) -> List[Dict[str, str]]:
                 "status": f"ERROR: {exc}",
             }
         all_results.append(result)
+
+    # Ask to delete source files for processed contractors
+    if os.path.isdir(filepath) and not yes:
+        processed_files = {
+            c.get("_source_file", "") for c in to_create if c.get("_source_file")
+        }
+        all_files = {
+            str(f) for f in Path(filepath).iterdir()
+            if f.is_file() and f.suffix.lower() not in (".log",)
+        }
+        if processed_files:
+            all_selected = processed_files >= all_files
+            if all_selected:
+                msg = "Видалити всі файли з input\\"
+            else:
+                names = ", ".join(Path(p).name for p in sorted(processed_files))
+                msg = f"Видалити: {names}"
+            print(f"\n  {msg}? Enter=так / 0=ні")
+            if input("> ").strip() != "0":
+                for fp in processed_files:
+                    try:
+                        Path(fp).unlink()
+                        logger.info("Deleted: %s", fp)
+                    except Exception as exc:
+                        logger.warning("Could not delete %s: %s", fp, exc)
 
     return all_results
 
