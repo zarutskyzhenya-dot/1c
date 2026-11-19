@@ -283,7 +283,14 @@ def _gpt_parse(raw: str) -> dict:
         raw = parts[1] if len(parts) > 1 else raw
         if raw.startswith("json"):
             raw = raw[4:]
-    return json.loads(raw.strip())
+    raw = raw.strip()
+    # Find first { in case model prepends reasoning text
+    json_start = raw.find('{')
+    if json_start > 0:
+        raw = raw[json_start:]
+    # raw_decode parses first complete JSON object, ignores trailing text/reasoning
+    obj, _ = json.JSONDecoder().raw_decode(raw)
+    return obj
 
 
 def _gpt_text(text: str, client) -> dict:
@@ -369,10 +376,6 @@ def _claude_or_vision(img_bytes: bytes, mime: str) -> dict:
             logger.warning("Claude OR vision: empty content. Response: %s", str(data)[:300])
             return {}
         try:
-            # Claude may prepend reasoning — find first { and parse from there
-            json_start = content.find('{')
-            if json_start > 0:
-                content = content[json_start:]
             return _gpt_parse(content)
         except Exception as parse_exc:
             logger.warning("Claude OR vision: JSON parse failed (%s). Content: %s", parse_exc, repr(content[:300]))
