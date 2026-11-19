@@ -526,7 +526,12 @@ def _open_text(filepath: str):
     elif bom[:3] == b"\xef\xbb\xbf":
         enc = "utf-8-sig"
     else:
-        enc = "utf-8-sig"
+        try:
+            with open(filepath, encoding="utf-8", errors="strict") as _tf:
+                _tf.read()
+            enc = "utf-8"
+        except (UnicodeDecodeError, ValueError):
+            enc = "cp1251"
     return open(filepath, encoding=enc, errors="replace", newline="")
 
 
