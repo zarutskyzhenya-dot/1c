@@ -695,6 +695,18 @@ def load_records(filepath: str) -> List[Dict[str, str]]:
     _raw = _gpt_text(_text, _client)
     _raw = _inject_regex_ibans(_raw, _text)
     _data = _normalize(_raw)
+    # Regex rescue: fill name/edrpou if GPT missed them (free-form messages)
+    if not _data.get("name"):
+        _m = re.search(r'ФОП\s+([\wЀ-ӿ\'\-]+\s+[\wЀ-ӿ\'\-]+\s+[\wЀ-ӿ\'\-]+)', _text)
+        if _m:
+            _data["name"] = "ФОП " + _m.group(1).strip()
+            _data.setdefault("type", "ФОП")
+    if not _data.get("edrpou"):
+        _m = re.search(r'(?:ЄДРПОУ|ІПН|РНОКПП|КОД)[:/\s]+(\d{8,10})', _text, re.IGNORECASE)
+        if _m:
+            _candidate = _m.group(1).strip()
+            if len(_candidate) in (8, 10):
+                _data["edrpou"] = _candidate
     _validate(_data)
     return [_data]
 
