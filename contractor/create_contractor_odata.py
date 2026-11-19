@@ -277,6 +277,22 @@ def _gpt_vision(img_bytes: bytes, client, mime: str = "image/png") -> dict:
     return _gpt_parse(resp.choices[0].message.content)
 
 
+def _inject_regex_ibans(raw: dict, text: str) -> dict:
+    """Replace GPT IBAN values with regex-found ones from raw text (more reliable for digit accuracy)."""
+    text_clean = re.sub(r'[\s\-]', '', text)
+    found = re.findall(r'UA\d{27}', text_clean)
+    if not found:
+        return raw
+    existing = raw.get("рахунки") or []
+    raw["рахунки"] = [
+        {"iban": iban,
+         "мфо":  existing[i].get("мфо", "") if i < len(existing) else "",
+         "банк": existing[i].get("банк", "") if i < len(existing) else ""}
+        for i, iban in enumerate(found)
+    ]
+    return raw
+
+
 def extract_from_file(filepath: str) -> Dict[str, str]:
     """GPT-4o витягує реквізити з JPEG/PNG/PDF/DOCX. Повертає нормалізований dict."""
     import openai, io
@@ -300,6 +316,7 @@ def extract_from_file(filepath: str) -> Dict[str, str]:
         doc.close()
         if len(text.strip()) > 100:
             raw = _gpt_text(text, client)
+            raw = _inject_regex_ibans(raw, text)
         else:
             doc = fitz.open(str(p))
             pix = doc[0].get_pixmap(matrix=fitz.Matrix(2, 2))
@@ -311,9 +328,9 @@ def extract_from_file(filepath: str) -> Dict[str, str]:
         document = _docx.Document(str(p))
         text = "\n".join(para.text for para in document.paragraphs)
         for table in document.tables:
-            for row in table.rows:
-                text += "\n" + " | ".join(cell.text for cell in row.cells)
+            text += "\n" + " | ".join(cell.text for cell in row.cells)
         raw = _gpt_text(text, client)
+        raw = _inject_regex_ibans(raw, text)
 
     else:
         mime_map = {
@@ -845,7 +862,7 @@ def _prompt_select(prompt: str, count: int):
                 return valid
         except ValueError:
             pass
-        print(f"  Enter numbers 1-{count} comma-separated, Enter=all, 0=cancel")
+        print(f"  Введіть числа 1-{count} через кому, Enter=всі, 0=скасувати")
 
 
 def _ask_contractors_table(new_items: list, skip_items: list, yes: bool,
@@ -853,33 +870,33 @@ def _ask_contractors_table(new_items: list, skip_items: list, yes: bool,
     total = len(new_items) + len(skip_items) + len(add_items)
     LINE = "=" * 68
     print(f"\n{LINE}")
-    print(f"  FOUND: {total} record(s)")
+    print(f"  ЗНАЙДЕНО: {total} запис(ів)")
     print(LINE)
     for idx, c in enumerate(new_items, 1):
-        print(f"  [{idx}] {c.get('name','')[:36]:<36} | EDRPOU={c.get('edrpou',''):<12} | -> will create")
+        print(f"  [{idx}] {c.get('name','')[:36]:<36} | ЄДРПОУ={c.get('edrpou',''):<12} | → буде створено")
     for c in add_items:
-        print(f"  [+] {c.get('name','')[:36]:<36} | EDRPOU={c.get('edrpou',''):<12} | -> add account")
+        print(f"  [+] {c.get('name','')[:36]:<36} | ЄДРПОУ={c.get('edrpou',''):<12} | → додати рахунок")
     if (new_items or add_items) and skip_items:
         print(f"  {'- ' * 34}")
     for c in skip_items:
-        reason = "no EDRPOU" if not c.get("edrpou", "").strip() else "already exists"
-        print(f"  [*] {c.get('name','')[:36]:<36} | EDRPOU={c.get('edrpou',''):<12} | {reason}")
+        reason = "немає ЄДРПОУ" if not c.get("edrpou", "").strip() else "вже існує"
+        print(f"  [*] {c.get('name','')[:36]:<36} | ЄДРПОУ={c.get('edrpou',''):<12} | {reason}")
     print(LINE)
-    print(f"  Will create: {len(new_items)}  |  Add account: {len(add_items)}  |  Skip: {len(skip_items)}")
+    print(f"  Буде створено: {len(new_items)}  |  Додати рахунок: {len(add_items)}  |  Пропущено: {len(skip_items)}")
     print(LINE)
 
     if not new_items:
         if add_items:
-            print("  No new contractors to create.\n")
+            print("  Нових контрагентів немає.\n")
         else:
-            print("  All records already exist. Nothing to create.\n")
+            print("  Всі записи вже існують.\n")
         return []
 
     if yes:
-        print("  --yes: creating all new records automatically.\n")
+        print("  --yes: створюємо всі нові записи автоматично.\n")
         return new_items
 
-    idx = _prompt_select(f"Create: Enter=all / 1-{len(new_items)} / 0=cancel\n> ", len(new_items))
+    idx = _prompt_select(f"Створити: Enter=всі / 1-{len(new_items)} / 0=скасувати\n> ", len(new_items))
     return [] if idx is None else [new_items[i] for i in idx]
 
 
@@ -889,19 +906,19 @@ def _iban_ok(iban: str) -> bool:
 
 def _ask_accounts(name: str, ibans: list) -> list:
     print()
-    print(f"  Accounts for {name}:")
+    print(f"  Рахунки {name}:")
     for i, (iban, mfo, bank) in enumerate(ibans, 1):
-        warn = f"  ⚠ {len(iban)} chars, expected 29" if iban and not _iban_ok(iban) else ""
-        print(f"    [{i}] {iban or '-':<34} MFO {mfo or '-':<8} {(bank or '-')[:20]}{warn}")
+        warn = f"  ⚠ {len(iban)} символів, очікується 29" if iban and not _iban_ok(iban) else ""
+        print(f"    [{i}] {iban or '-':<34} МФО {mfo or '-':<8} {(bank or '-')[:20]}{warn}")
     print()
-    idx = _prompt_select(f"Select: Enter=all / 1-{len(ibans)} / 0=skip accounts\n> ", len(ibans))
+    idx = _prompt_select(f"Вибрати: Enter=всі / 1-{len(ibans)} / 0=пропустити рахунки\n> ", len(ibans))
     return [] if idx is None else [ibans[i] for i in idx]
 
 
 def _ask_create_without_bank(name: str) -> bool:
     print()
-    print(f"  No bank account found. Create {name[:40]} without?")
-    print("  Enter=yes / 0=skip")
+    print(f"  Розрахунковий рахунок не знайдено. Створити {name[:40]} без рахунку?")
+    print("  Enter=так / 0=пропустити")
     raw = input("> ").strip()
     return raw != "0"
 
@@ -1085,9 +1102,9 @@ def integrate_file(filepath: str, yes: bool = False) -> List[Dict[str, str]]:
 # ─────────────────────────── Output ──────────────────────────────────────────
 
 _STATUS_LABEL = {
-    "created":        "Created",
-    "already_exists": "Already exists",
-    "account_added":  "Account added",
+    "created":        "Створено",
+    "already_exists": "Вже існує",
+    "account_added":  "Рахунок додано",
 }
 
 def _count_accounts(r: Dict) -> int:
@@ -1107,8 +1124,8 @@ def print_summary(all_results: List[Dict[str, str]]) -> None:
 
     LINE = "=" * 68
     print(f"\n{LINE}")
-    print(f"  DONE: {len(all_results)}  |  Created: {created}  |  "
-          f"Accounts added: {added}  |  Skipped: {skipped}  |  Errors: {errors}")
+    print(f"  ГОТОВО: {len(all_results)}  |  Створено: {created}  |  "
+          f"Рахунків додано: {added}  |  Пропущено: {skipped}  |  Помилок: {errors}")
     print(LINE)
 
     for r in all_results:
@@ -1118,8 +1135,8 @@ def print_summary(all_results: List[Dict[str, str]]) -> None:
         icon   = "✓" if status in ("created", "already_exists", "account_added") else "✗"
         label  = _STATUS_LABEL.get(status, status)
         accts  = _count_accounts(r)
-        acct_s = f"  ({accts} account{'s' if accts != 1 else ''})" if accts else ""
-        print(f"  {icon} {name:<42} EDRPOU={edrpou:<12} {label}{acct_s}")
+        acct_s = f"  ({accts} рах.)" if accts else ""
+        print(f"  {icon} {name:<42} ЄДРПОУ={edrpou:<12} {label}{acct_s}")
 
     print(LINE + "\n")
 
