@@ -913,7 +913,21 @@ def _ask_accounts(name: str, ibans: list) -> list:
         print(f"    [{i}] {iban or '-':<34} МФО {mfo or '-':<8} {(bank or '-')[:20]}{warn}")
     print()
     idx = _prompt_select(f"Вибрати: Enter=всі / 1-{len(ibans)} / 0=пропустити рахунки\n> ", len(ibans))
-    return [] if idx is None else [ibans[i] for i in idx]
+    if idx is None:
+        return []
+
+    result = []
+    for i in idx:
+        iban, mfo, bank = ibans[i]
+        if iban and not _iban_ok(iban):
+            print(f"\n  ⚠ IBAN [{i + 1}] має {len(iban)} символів (очікується 29)")
+            raw = input("  Введи правильний IBAN або Enter щоб залишити: ").strip()
+            if raw:
+                cleaned = raw.replace(" ", "").upper()
+                m = re.search(r'UA\d{27}', cleaned)
+                iban = m.group(0) if m else cleaned
+        result.append((iban, mfo, bank))
+    return result
 
 
 def _ask_create_without_bank(name: str) -> bool:
