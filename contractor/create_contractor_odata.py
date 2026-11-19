@@ -322,7 +322,15 @@ def _claude_or_vision(img_bytes: bytes, mime: str) -> dict:
             },
             timeout=60,
         )
-        return _gpt_parse(resp.json()["choices"][0]["message"]["content"])
+        if resp.status_code != 200:
+            logger.warning("Claude OR vision HTTP %s: %s", resp.status_code, resp.text[:300])
+            return {}
+        data = resp.json()
+        content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        if not content:
+            logger.warning("Claude OR vision: empty content. Response: %s", str(data)[:300])
+            return {}
+        return _gpt_parse(content)
     except Exception as exc:
         logger.warning("Claude OR vision failed: %s", exc)
         return {}
@@ -348,7 +356,17 @@ def _gemini_vision(img_bytes: bytes, mime: str) -> dict:
             },
             timeout=60,
         )
-        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        data = resp.json()
+        if "error" in data:
+            logger.warning("Gemini vision error: %s", data["error"])
+            return {}
+        candidates = data.get("candidates") or []
+        if not candidates:
+            logger.warning("Gemini vision: no candidates. Response: %s", str(data)[:300])
+            return {}
+        text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+        if not text:
+            return {}
         return _gpt_parse(text)
     except Exception as exc:
         logger.warning("Gemini vision failed: %s", exc)
