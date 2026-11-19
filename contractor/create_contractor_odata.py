@@ -699,21 +699,41 @@ def load_records(filepath: str) -> List[Dict[str, str]]:
         _text = _fh.read()
     _raw = _gpt_text(_text, _client)
     _raw = _inject_regex_ibans(_raw, _text)
-    _data = _normalize(_raw)
+    # Same as extract_from_file: normalize base fields WITHOUT рахунки
+    _base_fields = {k: (v or "") for k, v in _raw.items()
+                    if v is not None and k not in ("рахунки", "iban", "мфо", "банк")}
+    _base = _normalize(_base_fields)
     # Regex rescue: fill name/edrpou if GPT missed them (free-form messages)
-    if not _data.get("name"):
+    if not _base.get("name"):
         _m = re.search(r'ФОП\s+([\wЀ-ӿ\'\-]+\s+[\wЀ-ӿ\'\-]+\s+[\wЀ-ӿ\'\-]+)', _text)
         if _m:
-            _data["name"] = "ФОП " + _m.group(1).strip()
-            _data.setdefault("type", "ФОП")
-    if not _data.get("edrpou"):
+            _base["name"] = "ФОП " + _m.group(1).strip()
+            _base.setdefault("type", "ФОП")
+    if not _base.get("edrpou"):
         _m = re.search(r'(?:ЄДРПОУ|ІПН|РНОКПП|КОД)[:/\s]+(\d{8,10})', _text, re.IGNORECASE)
         if _m:
             _candidate = _m.group(1).strip()
             if len(_candidate) in (8, 10):
-                _data["edrpou"] = _candidate
-    _validate(_data)
-    return [_data]
+                _base["edrpou"] = _candidate
+    _validate(_base)
+    # Build one record per account (same logic as extract_from_file lines 493-513)
+    _рахунки = _raw.get("рахунки") or []
+    if not _рахунки:
+        _рахунки = [{"iban": _raw.get("iban"), "мфо": _raw.get("мфо"), "банк": _raw.get("банк")}]
+    _records = []
+    for _acc in _рахунки:
+        if not isinstance(_acc, dict):
+            continue
+        _rec = _base.copy()
+        _raw_iban = str(_acc.get("iban") or "").replace(" ", "").upper()
+        _mi = re.search(r'UA\d{27}', _raw_iban)
+        _rec["iban"] = _mi.group(0) if _mi else _raw_iban
+        _rec["mfo"]  = str(_acc.get("мфо") or _acc.get("mfo") or "")
+        _rec["bank"] = str(_acc.get("банк") or _acc.get("bank") or "")
+        _records.append(_rec)
+    if not _records:
+        _records = [_base]
+    return _records
 
 
 SUPPORTED_EXTS = {".xlsx", ".xls", ".txt", ".csv", ".tsv", ".json"} | VISION_EXTS
