@@ -971,8 +971,12 @@ def find_bank_accounts_by_contractor(contractor_ref: str) -> List[str]:
 
 def create_bank_account(data: Dict[str, str], contractor_ref: str) -> str:
     iban      = data.get("iban", "").replace(" ", "")
-    mfo       = data.get("mfo", "")
+    mfo       = data.get("mfo", "") or ""
     bank_name = data.get("bank", "")
+
+    # UA IBAN: UA + 2 check digits + 6 MFO digits + 19 account digits
+    if (not mfo or mfo.lower() == "null") and re.match(r'^UA\d{27}$', iban):
+        mfo = iban[4:10]
 
     bank_ref     = get_bank_klassif_ref(mfo)
     use_bank_ref = bank_ref != ZERO_GUID
