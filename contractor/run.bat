@@ -46,13 +46,5 @@ echo.
 C:\Python311-32\python.exe create_contractor_odata.py "%INPUT_DIR%" --db Vlada2
 
 echo.
-set /p "DEL=Delete processed files? 1=yes / 0=no: "
-if "!DEL!"=="1" (
-    for %%F in ("%INPUT_DIR%\*.*") do (
-        if /i not "%%~xF"==".log" del "%%F"
-    )
-)
-
-echo.
-echo Done.
+echo Done. Check results above, then manually delete files from input\ if needed.
 pause

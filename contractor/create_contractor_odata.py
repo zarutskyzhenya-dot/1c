@@ -178,6 +178,40 @@ def get_organization_ref() -> str:
     return ZERO_GUID
 
 
+def _get_catalog_ref_by_name(catalog: str, name: str) -> str:
+    """Find Ref_Key in any catalog by Description (case-insensitive)."""
+    name_lower = name.strip().lower()
+    skip = 0
+    while True:
+        resp = _get(catalog, params={
+            "$top": "200", "$skip": str(skip),
+            "$format": "json", "$select": "Ref_Key,Description,DeletionMark",
+        })
+        items = _extract_value(resp)
+        if not isinstance(items, list) or not items:
+            break
+        for item in items:
+            if item.get("DeletionMark"):
+                continue
+            if str(item.get("Description", "")).strip().lower() == name_lower:
+                return item["Ref_Key"]
+        if len(items) < 200:
+            break
+        skip += 200
+    logger.warning("%s '%s' not found", catalog, name)
+    return ZERO_GUID
+
+
+def get_warehouse_ref(name: str = "Торговый зал") -> str:
+    return _get_catalog_ref_by_name("Catalog_Склады", name)
+
+
+def get_cash_flow_article_ref(name: str = "Оплата поставщику") -> str:
+    return _get_catalog_ref_by_name(
+        "Catalog_СтатьиДвиженияДенежныхСредств", name
+    )
+
+
 def get_bank_klassif_ref(mfo: str) -> str:
     if not mfo:
         return ZERO_GUID
@@ -465,7 +499,8 @@ def extract_from_file(filepath: str) -> Dict[str, str]:
         document = _docx.Document(str(p))
         text = "\n".join(para.text for para in document.paragraphs)
         for table in document.tables:
-            text += "\n" + " | ".join(cell.text for cell in row.cells)
+            for row in table.rows:
+                text += "\n" + " | ".join(cell.text for cell in row.cells)
         raw = _gpt_text(text, client)
         raw = _inject_regex_ibans(raw, text)
 
@@ -954,17 +989,18 @@ def create_bank_account(data: Dict[str, str], contractor_ref: str) -> str:
 
 
 def create_agreement(data: Dict[str, str], contractor_ref: str,
-                     partner_ref: str, admin_ref: str, org_ref: str) -> str:
+                     partner_ref: str, admin_ref: str) -> str:
     agreement_name = f"Угода з {data['name']}"
-    currency_ref = get_currency_ref("980")
+    currency_ref      = get_currency_ref("980")
+    warehouse_ref     = get_warehouse_ref("Торговый зал")
+    cash_flow_ref     = get_cash_flow_article_ref("Оплата поставщику")
     payload: Dict[str, Any] = {
         "Description": agreement_name,
         "Контрагент_Key": contractor_ref,
         "Партнер_Key": partner_ref,
-        "Организация_Key": org_ref,
         "Валюта_Key": currency_ref,
-        "Склад_Key": "4f84bc34-0681-11e8-96fb-2c4d545a248c",
-        "СтатьяДвиженияДенежныхСредств_Key": "647f29b7-0681-11e8-96fb-2c4d545a248c",
+        "Склад_Key": warehouse_ref,
+        "СтатьяДвиженияДенежныхСредств_Key": cash_flow_ref,
         "Менеджер_Key": admin_ref,
         "Статус": "Действует",
         "Согласован": True,
@@ -1032,9 +1068,8 @@ def integrate_data(data: Dict[str, str]) -> Dict[str, str]:
         results["BankAccount_Ref_Key"] = "SKIPPED (no IBAN/MFO)"
 
     admin_ref = get_admin_ref()
-    org_ref   = get_organization_ref()
     results["Agreement_Ref_Key"] = create_agreement(
-        data, contractor_ref, partner_ref, admin_ref, org_ref
+        data, contractor_ref, partner_ref, admin_ref
     )
     results["status"] = "created"
     return results
