@@ -369,6 +369,10 @@ def _claude_or_vision(img_bytes: bytes, mime: str) -> dict:
             logger.warning("Claude OR vision: empty content. Response: %s", str(data)[:300])
             return {}
         try:
+            # Claude may prepend reasoning — find first { and parse from there
+            json_start = content.find('{')
+            if json_start > 0:
+                content = content[json_start:]
             return _gpt_parse(content)
         except Exception as parse_exc:
             logger.warning("Claude OR vision: JSON parse failed (%s). Content: %s", parse_exc, repr(content[:300]))
